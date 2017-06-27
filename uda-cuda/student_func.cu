@@ -129,26 +129,21 @@ void gaussian_blur(const unsigned char* const inputChannel,
   // the value is out of bounds), you should explicitly clamp the neighbor values you read
   // to be within the bounds of the image. If this is not clear to you, then please refer
   // to sequential reference solution for the exact clamping semantics you should follow.
-	const int2 thread_2D_pos = make_int2(threadIdx.x, blockIdx.x);
+	const int2 thread_2D_pos = make_int2(blockIdx.x * blockDim.x,
+		blockIdx.y * blockDim.y);
 
-	const int thread_1D_pos = thread_2D_pos.y * numCols + thread_2D_pos.x;
-	if (thread_2D_pos.x >= numCols || thread_2D_pos.y >= numRows) { return; }
-	float result = 0.f;
-	//For every value in the filter around the pixel (c, r)
-	for (int filter_r = -filterWidth / 2; filter_r <= filterWidth / 2; ++filter_r) {
-		for (int filter_c = -filterWidth / 2; filter_c <= filterWidth / 2; ++filter_c) {
-			//Find the global image position for this filter position
-			//clamp to boundary of the image
-			int image_r = min(max(thread_2D_pos.x + filter_r, 0), static_cast<int>(numRows - 1));
-			int image_c = min(max(thread_2D_pos.y + filter_c, 0), static_cast<int>(numCols - 1));
+	const int thread_1D_pos = thread_2D_pos.y * numRows + thread_2D_pos.x;
+	if (thread_2D_pos.x >= numRows || thread_2D_pos.y >= numCols) { return; }
+	
+	int image_r = min(max(thread_2D_pos.x + threadIdx.x, 0), static_cast<int>(numRows - 1));
+	int image_c = min(max(thread_2D_pos.y + threadIdx.y, 0), static_cast<int>(numCols - 1));
 
-			float image_value = static_cast<float>(inputChannel[image_r * numCols + image_c]);
-			float filter_value = filter[(filter_r + filterWidth / 2) * filterWidth + filter_c + filterWidth / 2];
+	float image_value = static_cast<float>(inputChannel[image_c * numRows + image_r]);
 
-			result += image_value * filter_value;
-		}
-	}
-	outputChannel[thread_1D_pos] = result;
+	float filter_value = filter[threadIdx.x * filterWidth + threadIdx.y];
+	float result = inputChannel[thread_1D_pos] * filter_value;
+
+	outputChannel[thread_1D_pos] = static_cast<unsigned char>(result);
 }
 
 //This kernel takes in an image represented as a uchar4 and splits
@@ -172,11 +167,12 @@ void separateChannels(const uchar4* const inputImageRGBA,
   // {
   //     return;
   // }
-	const int2 thread_2D_pos = make_int2(threadIdx.x, blockIdx.x);
+	const int2 thread_2D_pos = make_int2(blockIdx.x * blockDim.x,
+		blockIdx.y * blockDim.y);
 
-	const int thread_1D_pos = thread_2D_pos.y * numCols + thread_2D_pos.x;
+	const int thread_1D_pos = thread_2D_pos.y * numRows + thread_2D_pos.x;
 
-	if (thread_2D_pos.x >= numCols || thread_2D_pos.y >= numRows) { return; }
+	if (thread_2D_pos.x >= numRows || thread_2D_pos.y >= numCols) { return; }
 	uchar4 temp = inputImageRGBA[thread_1D_pos];
 	redChannel[thread_1D_pos] = temp.x;
 	greenChannel[thread_1D_pos] = temp.y;
@@ -194,14 +190,14 @@ void recombineChannels(const unsigned char* const redChannel,
                        int numRows,
                        int numCols)
 {
-  const int2 thread_2D_pos = make_int2(threadIdx.x, blockIdx.x);
+  const int2 thread_2D_pos = make_int2(blockIdx.x * blockDim.x,
+	  blockIdx.y * blockDim.y);
 
-  const int thread_1D_pos = thread_2D_pos.y * numCols + thread_2D_pos.x;
+  const int thread_1D_pos = thread_2D_pos.y * numRows + thread_2D_pos.x;
 
   //make sure we don't try and access memory outside the image
   //by having any threads mapped there return early
-  if (thread_2D_pos.x >= numCols || thread_2D_pos.y >= numRows)
-    return;
+  if (thread_2D_pos.x >= numRows || thread_2D_pos.y >= numCols) { return; }
 
   unsigned char red   = redChannel[thread_1D_pos];
   unsigned char green = greenChannel[thread_1D_pos];
@@ -233,12 +229,13 @@ void allocateMemoryAndCopyToGPU(const size_t numRowsImage, const size_t numColsI
   //be sure to use checkCudaErrors like the above examples to
   //be able to tell if anything goes wrong
   //IMPORTANT: Notice that we pass a pointer to a pointer to cudaMalloc
-
+  checkCudaErrors(cudaMalloc(&d_filter, sizeof(float) * filterWidth * filterWidth));
   //TODO:
   //Copy the filter on the host (h_filter) to the memory you just allocated
   //on the GPU.  cudaMemcpy(dst, src, numBytes, cudaMemcpyHostToDevice);
   //Remember to use checkCudaErrors!
 
+  checkCudaErrors(cudaMemcpy(d_filter, &h_filter, sizeof(float) * filterWidth * filterWidth, cudaMemcpyHostToDevice));
 }
 
 void your_gaussian_blur(const uchar4 * const h_inputImageRGBA, uchar4 * const d_inputImageRGBA,
@@ -249,24 +246,24 @@ void your_gaussian_blur(const uchar4 * const h_inputImageRGBA, uchar4 * const d_
                         const int filterWidth)
 {
   //TODO: Set reasonable block size (i.e., number of threads per block)
-  const dim3 blockSize(numRows, 1, 1);
+  const dim3 blockSize(filterWidth, filterWidth, 1);
 
   //TODO:
   //Compute correct grid size (i.e., number of blocks per kernel launch)
   //from the image size and and block size.
-  const dim3 gridSize(numCols, 1, 1);
+  const dim3 gridSize(numRows, numCols, 1);
   cudaDeviceSynchronize();
 
   //TODO: Launch a kernel for separating the RGBA image into different color channels
-  separateChannels << < gridSize, blockSize >> >(d_inputImageRGBA, numRows, numCols, d_red, d_green, d_blue);
+  separateChannels << < gridSize, (1, 1, 1) >> >(d_inputImageRGBA, numRows, numCols, d_red, d_green, d_blue);
   // Call cudaDeviceSynchronize(), then call checkCudaErrors() immediately after
   // launching your kernel to make sure that you didn't make any mistakes.
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
   //TODO: Call your convolution kernel here 3 times, once for each color channel.
-  gaussian_blur << < gridSize, blockSize >> > (d_red, d_redBlurred, numRows, numCols, d_filter, filterWidth);
-  gaussian_blur << < gridSize, blockSize >> > (d_green, d_greenBlurred, numRows, numCols, d_filter, filterWidth);
-  gaussian_blur << < gridSize, blockSize >> > (d_blue, d_blueBlurred, numRows, numCols, d_filter, filterWidth);
+  gaussian_blur << < gridSize, (1, 1, 1) >> > (d_red, d_redBlurred, numRows, numCols, d_filter, filterWidth);
+  gaussian_blur << < gridSize, (1, 1, 1) >> > (d_green, d_greenBlurred, numRows, numCols, d_filter, filterWidth);
+  gaussian_blur << < gridSize, (1, 1, 1) >> > (d_blue, d_blueBlurred, numRows, numCols, d_filter, filterWidth);
   // Again, call cudaDeviceSynchronize(), then call checkCudaErrors() immediately after
   // launching your kernel to make sure that you didn't make any mistakes.
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
@@ -275,7 +272,7 @@ void your_gaussian_blur(const uchar4 * const h_inputImageRGBA, uchar4 * const d_
   //
   // NOTE: This kernel launch depends on the gridSize and blockSize variables,
   // which you must set yourself.
-  recombineChannels<<<gridSize, blockSize>>>(d_redBlurred,
+  recombineChannels<<<gridSize, (1, 1, 1) >>>(d_redBlurred,
                                              d_greenBlurred,
                                              d_blueBlurred,
                                              d_outputImageRGBA,
@@ -313,107 +310,108 @@ void cleanup() {
 /*******  DEFINED IN student_func.cu *********/
 
 void your_gaussian_blur(const uchar4 * const h_inputImageRGBA, uchar4 * const d_inputImageRGBA,
-                        uchar4* const d_outputImageRGBA,
-                        const size_t numRows, const size_t numCols,
-                        unsigned char *d_redBlurred,
-                        unsigned char *d_greenBlurred,
-                        unsigned char *d_blueBlurred,
-                        const int filterWidth);
+	uchar4* const d_outputImageRGBA,
+	const size_t numRows, const size_t numCols,
+	unsigned char *d_redBlurred,
+	unsigned char *d_greenBlurred,
+	unsigned char *d_blueBlurred,
+	const int filterWidth);
 
 void allocateMemoryAndCopyToGPU(const size_t numRowsImage, const size_t numColsImage,
-                                const float* const h_filter, const size_t filterWidth);
+	const float* const h_filter, const size_t filterWidth);
 
 
 /*******  Begin main *********/
 
 int main(int argc, char **argv) {
-  uchar4 *h_inputImageRGBA,  *d_inputImageRGBA;
-  uchar4 *h_outputImageRGBA, *d_outputImageRGBA;
-  unsigned char *d_redBlurred, *d_greenBlurred, *d_blueBlurred;
+	uchar4 *h_inputImageRGBA, *d_inputImageRGBA;
+	uchar4 *h_outputImageRGBA, *d_outputImageRGBA;
+	unsigned char *d_redBlurred, *d_greenBlurred, *d_blueBlurred;
 
-  float *h_filter;
-  int    filterWidth;
+	float *h_filter;
+	int    filterWidth;
 
-  std::string input_file;
-  std::string output_file;
-  std::string reference_file;
-  double perPixelError = 0.0;
-  double globalError   = 0.0;
-  bool useEpsCheck = false;
-  switch (argc)
-  {
+	std::string input_file;
+	std::string output_file;
+	std::string reference_file;
+	double perPixelError = 0.0;
+	double globalError = 0.0;
+	bool useEpsCheck = false;
+	switch (argc)
+	{
 	case 2:
-	  input_file = std::string(argv[1]);
-	  output_file = "HW2_output.png";
-	  reference_file = "HW2_reference.png";
-	  break;
+		input_file = std::string(argv[1]);
+		output_file = "HW2_output.png";
+		reference_file = "HW2_reference.png";
+		break;
 	case 3:
-	  input_file  = std::string(argv[1]);
-      output_file = std::string(argv[2]);
-	  reference_file = "HW2_reference.png";
-	  break;
+		input_file = std::string(argv[1]);
+		output_file = std::string(argv[2]);
+		reference_file = "HW2_reference.png";
+		break;
 	case 4:
-	  input_file  = std::string(argv[1]);
-      output_file = std::string(argv[2]);
-	  reference_file = std::string(argv[3]);
-	  break;
+		input_file = std::string(argv[1]);
+		output_file = std::string(argv[2]);
+		reference_file = std::string(argv[3]);
+		break;
 	case 6:
-	  useEpsCheck=true;
-	  input_file  = std::string(argv[1]);
-	  output_file = std::string(argv[2]);
-	  reference_file = std::string(argv[3]);
-	  perPixelError = atof(argv[4]);
-      globalError   = atof(argv[5]);
-	  break;
+		useEpsCheck = true;
+		input_file = std::string(argv[1]);
+		output_file = std::string(argv[2]);
+		reference_file = std::string(argv[3]);
+		perPixelError = atof(argv[4]);
+		globalError = atof(argv[5]);
+		break;
 	default:
-      std::cerr << "Usage: ./HW2 input_file [output_filename] [reference_filename] [perPixelError] [globalError]" << std::endl;
-      exit(1);
-  }
-  //load the image and give us our input and output pointers
-  preProcess(&h_inputImageRGBA, &h_outputImageRGBA, &d_inputImageRGBA, &d_outputImageRGBA,
-             &d_redBlurred, &d_greenBlurred, &d_blueBlurred,
-             &h_filter, &filterWidth, input_file);
+		std::cerr << "Usage: ./HW2 input_file [output_filename] [reference_filename] [perPixelError] [globalError]" << std::endl;
+		exit(1);
+	}
+	//load the image and give us our input and output pointers
+	preProcess(&h_inputImageRGBA, &h_outputImageRGBA, &d_inputImageRGBA, &d_outputImageRGBA,
+		&d_redBlurred, &d_greenBlurred, &d_blueBlurred,
+		&h_filter, &filterWidth, input_file);
+	printf(h_filter);
+	allocateMemoryAndCopyToGPU(numRows(), numCols(), h_filter, filterWidth);
+	GpuTimer timer;
+	timer.Start();
+	//call the students' code
+	your_gaussian_blur(h_inputImageRGBA, d_inputImageRGBA, d_outputImageRGBA, numRows(), numCols(),
+		d_redBlurred, d_greenBlurred, d_blueBlurred, filterWidth);
+	timer.Stop();
+	cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+	int err = printf("Your code ran in: %f msecs.\n", timer.Elapsed());
 
-  allocateMemoryAndCopyToGPU(numRows(), numCols(), h_filter, filterWidth);
-  GpuTimer timer;
-  timer.Start();
-  //call the students' code
-  your_gaussian_blur(h_inputImageRGBA, d_inputImageRGBA, d_outputImageRGBA, numRows(), numCols(),
-                     d_redBlurred, d_greenBlurred, d_blueBlurred, filterWidth);
-  timer.Stop();
-  cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-  int err = printf("Your code ran in: %f msecs.\n", timer.Elapsed());
+	if (err < 0) {
+		//Couldn't print! Probably the student closed stdout - bad news
+		std::cerr << "Couldn't print timing information! STDOUT Closed!" << std::endl;
+		exit(1);
+	}
 
-  if (err < 0) {
-    //Couldn't print! Probably the student closed stdout - bad news
-    std::cerr << "Couldn't print timing information! STDOUT Closed!" << std::endl;
-    exit(1);
-  }
+	//check results and output the blurred image
 
-  //check results and output the blurred image
+	size_t numPixels = numRows()*numCols();
+	//copy the output back to the host
+	checkCudaErrors(cudaMemcpy(h_outputImageRGBA, d_outputImageRGBA__, sizeof(uchar4) * numPixels, cudaMemcpyDeviceToHost));
 
-  size_t numPixels = numRows()*numCols();
-  //copy the output back to the host
-  checkCudaErrors(cudaMemcpy(h_outputImageRGBA, d_outputImageRGBA__, sizeof(uchar4) * numPixels, cudaMemcpyDeviceToHost));
+	postProcess(output_file, h_outputImageRGBA);
 
-  postProcess(output_file, h_outputImageRGBA);
+	// referenceCalculation(h_inputImageRGBA, h_outputImageRGBA,
+	// 	numRows(), numCols(),
+	// 	h_filter, filterWidth);
 
-  //referenceCalculation(h_inputImageRGBA, h_outputImageRGBA,
- //                      numRows(), numCols(),
-  //                     h_filter, filterWidth);
+	// postProcess(reference_file, h_outputImageRGBA);
 
-  postProcess(reference_file, h_outputImageRGBA);
+	//  Cheater easy way with OpenCV
+	//generateReferenceImage(input_file, reference_file, filterWidth);
 
-    //  Cheater easy way with OpenCV
-    //generateReferenceImage(input_file, reference_file, filterWidth);
+	// compareImages(reference_file, output_file, useEpsCheck, perPixelError, globalError);
 
-  //compareImages(reference_file, output_file, useEpsCheck, perPixelError, globalError);
+	checkCudaErrors(cudaFree(d_redBlurred));
+	checkCudaErrors(cudaFree(d_greenBlurred));
+	checkCudaErrors(cudaFree(d_blueBlurred));
 
-  checkCudaErrors(cudaFree(d_redBlurred));
-  checkCudaErrors(cudaFree(d_greenBlurred));
-  checkCudaErrors(cudaFree(d_blueBlurred));
+	cleanUp();
 
-  cleanUp();
-
-  return 0;
+	return 0;
 }
+

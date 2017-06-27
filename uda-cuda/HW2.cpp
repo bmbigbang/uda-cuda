@@ -108,6 +108,14 @@ void postProcess(const std::string& output_file, uchar4* data_ptr) {
 
   cv::Mat imageOutputBGR;
   cv::cvtColor(output, imageOutputBGR, CV_RGBA2BGR);
+
+  cv::namedWindow("MyWindow", CV_WINDOW_AUTOSIZE); //create a window with the name "MyWindow"
+  cv::imshow("MyWindow", imageOutputBGR); //display the image which is stored in the 'img' in the "MyWindow" window
+
+  cv::waitKey(0); //wait infinite time for a keypress
+
+  cv::destroyWindow("MyWindow"); //destroy the window with the name, "MyWindow"
+
   //output the image
   cv::imwrite(output_file.c_str(), imageOutputBGR);
 }
