@@ -10,10 +10,127 @@
 #include <thrust/device_vector.h>
 
 
-__global__ void radox(unsigned int* const d_inputVals, unsigned int* const d_inputPos, 
-	                  unsigned int* d_outputVals, unsigned int* const d_outputPos,
-	                  const size_t numElems) {
-	int pos = blockIdx.x * blockDim.x + threadIdx.x;
+/*
+* Copyright 1993-2015 NVIDIA Corporation.  All rights reserved.
+*
+* Please refer to the NVIDIA end user license agreement (EULA) associated
+* with this source code for terms and conditions that govern your use of
+* this software. Any use, reproduction, disclosure, or distribution of
+* this software and related documentation outside the terms of the EULA
+* is strictly prohibited.
+*
+*/
+
+
+
+#ifndef SORTINGNETWORKS_COMMON_CUH
+#define SORTINGNETWORKS_COMMON_CUH
+
+
+
+#include "sortingNetworks_common.h"
+
+//Enables maximum occupancy
+#define SHARED_SIZE_LIMIT 1024U
+
+//Map to single instructions on G8x / G9x / G100
+#define    UMUL(a, b) __umul24((a), (b))
+#define UMAD(a, b, c) ( UMUL((a), (b)) + (c) )
+
+
+
+__device__ inline void Comparator(
+	uint &keyA,
+	uint &valA,
+	uint &keyB,
+	uint &valB,
+	uint dir
+)
+{
+	uint t;
+
+	if ((keyA > keyB) == dir)
+	{
+		t = keyA;
+		keyA = keyB;
+		keyB = t;
+		t = valA;
+		valA = valB;
+		valB = t;
+	}
+}
+
+
+
+#endif
+
+
+
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Monolithic bitonic sort kernel for short arrays fitting into shared memory
+////////////////////////////////////////////////////////////////////////////////
+__global__ void bitonicSortShared(
+	
+    unsigned int *d_DstKey,
+	unsigned int *d_DstVal,
+	unsigned int *d_SrcKey,
+	unsigned int *d_SrcVal,
+	uint arrayLength,
+	uint dir
+)
+{
+	//Shared memory storage for one or more short vectors
+	__shared__ unsigned int s_key[SHARED_SIZE_LIMIT];
+	__shared__ unsigned int s_val[SHARED_SIZE_LIMIT];
+
+	//Offset to the beginning of subbatch and load data
+	d_SrcKey += blockIdx.x * SHARED_SIZE_LIMIT + threadIdx.x;
+	d_SrcVal += blockIdx.x * SHARED_SIZE_LIMIT + threadIdx.x;
+	d_DstKey += blockIdx.x * SHARED_SIZE_LIMIT + threadIdx.x;
+	d_DstVal += blockIdx.x * SHARED_SIZE_LIMIT + threadIdx.x;
+	s_key[threadIdx.x + 0] = d_SrcKey[0];
+	s_val[threadIdx.x + 0] = d_SrcVal[0];
+	s_key[threadIdx.x + (SHARED_SIZE_LIMIT / 2)] = d_SrcKey[(SHARED_SIZE_LIMIT / 2)];
+	s_val[threadIdx.x + (SHARED_SIZE_LIMIT / 2)] = d_SrcVal[(SHARED_SIZE_LIMIT / 2)];
+
+	for (unsigned int size = 2; size < arrayLength; size <<= 1)
+	{
+		//Bitonic merge
+		unsigned int ddd = dir ^ ((threadIdx.x & (size / 2)) != 0);
+
+		for (unsigned int stride = size / 2; stride > 0; stride >>= 1)
+		{
+			__syncthreads();
+			unsigned int pos = 2 * threadIdx.x - (threadIdx.x & (stride - 1));
+			Comparator(
+				s_key[pos + 0], s_val[pos + 0],
+				s_key[pos + stride], s_val[pos + stride],
+				ddd
+			);
+		}
+	}
+
+	//ddd == dir for the last bitonic merge step
+	{
+		for (unsigned int stride = arrayLength / 2; stride > 0; stride >>= 1)
+		{
+			__syncthreads();
+			unsigned int pos = 2 * threadIdx.x - (threadIdx.x & (stride - 1));
+			Comparator(
+				s_key[pos + 0], s_val[pos + 0],
+				s_key[pos + stride], s_val[pos + stride],
+				dir
+			);
+		}
+	}
+
+	__syncthreads();
+	d_DstKey[0] = s_key[threadIdx.x + 0];
+	d_DstVal[0] = s_val[threadIdx.x + 0];
+	d_DstKey[(SHARED_SIZE_LIMIT / 2)] = s_key[threadIdx.x + (SHARED_SIZE_LIMIT / 2)];
+	d_DstVal[(SHARED_SIZE_LIMIT / 2)] = s_val[threadIdx.x + (SHARED_SIZE_LIMIT / 2)];
 }
 
 /* Red Eye Removal
@@ -53,22 +170,27 @@ __global__ void radox(unsigned int* const d_inputVals, unsigned int* const d_inp
    at the end.
 
  */
+uint* h_yourOutputPos;
+uint* h_yourOutputVals;
 
-
-void your_sort(unsigned int* const d_inputVals,
-               unsigned int* const d_inputPos,
-               unsigned int* const d_outputVals,
-               unsigned int* const d_outputPos,
+void your_sort(unsigned int* d_inputVals,
+               unsigned int* d_inputPos,
+               unsigned int* d_outputVals,
+               unsigned int* d_outputPos,
                const size_t numElems)
 { 
   //TODO
   //PUT YOUR SORT HERE
-	const dim3 blockSize(1000, 1, 1);
-	const dim3 gridSize((numElems / 1001), 1, 1);
-	std::cout << numElems;
-	radox <<< gridSize, blockSize >>> (d_inputVals, d_inputPos, d_outputVals, d_outputPos, numElems);
+	std::cout << &d_inputVals[0] << std::endl;
+	std::cout << &d_inputPos[0] << std::endl;
 
+	unsigned int  blockCount = numElems / SHARED_SIZE_LIMIT;
+	unsigned int threadCount = SHARED_SIZE_LIMIT / 2;
+	bitonicSortShared << <blockCount, threadCount >> > (d_outputPos, d_outputVals, d_inputPos, d_inputVals, 256, 0);
 	cudaDeviceSynchronize(); cudaGetLastError();
+
+	std::cout << &d_outputVals[0] << std::endl;
+	std::cout << &d_outputPos[0] << std::endl;
 }
 
 //Udacity HW4 Driver
